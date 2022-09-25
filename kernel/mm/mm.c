@@ -1,5 +1,6 @@
 #include "mm.h"
 #include "mm-types.h"
+#include "mmio.h"
 #include "slab.h"
 #include <common/printk.h>
 #include <common/kprint.h>
@@ -11,6 +12,7 @@
 
 uint64_t mm_Total_Memory = 0;
 uint64_t mm_total_2M_pages = 0;
+struct mm_struct initial_mm = {0};
 
 struct memory_desc memory_management_struct = {{0}, 0};
 
@@ -64,7 +66,7 @@ void mm_init()
         if (mb2_mem_info->type == 1)
             mm_Total_Memory += mb2_mem_info->len;
 
-        kdebug("[i=%d] mb2_mem_info[i].type=%d, mb2_mem_info[i].addr=%#018lx", i, mb2_mem_info[i].type, mb2_mem_info[i].addr);
+        // kdebug("[i=%d] mb2_mem_info[i].type=%d, mb2_mem_info[i].addr=%#018lx", i, mb2_mem_info[i].type, mb2_mem_info[i].addr);
         // 保存信息到mms
         memory_management_struct.e820[i].BaseAddr = mb2_mem_info[i].addr;
         memory_management_struct.e820[i].Length = mb2_mem_info[i].len;
@@ -227,6 +229,27 @@ void mm_init()
     // 初始化slab内存池
     slab_init();
     page_table_init();
+
+    initial_mm.pgd = (pml4t_t *)get_CR3();
+
+    initial_mm.code_addr_start = memory_management_struct.kernel_code_start;
+    initial_mm.code_addr_end = memory_management_struct.kernel_code_end;
+
+    initial_mm.data_addr_start = (ul)&_data;
+    initial_mm.data_addr_end = memory_management_struct.kernel_data_end;
+
+    initial_mm.rodata_addr_start = (ul)&_rodata;
+    initial_mm.rodata_addr_end = (ul)&_erodata;
+    initial_mm.bss_start = (uint64_t)&_bss;
+    initial_mm.bss_end = (uint64_t)&_ebss;
+
+    initial_mm.brk_start = memory_management_struct.start_brk;
+    initial_mm.brk_end = current_pcb->addr_limit;
+
+    initial_mm.stack_start = _stack_start;
+    initial_mm.vmas = NULL;
+    
+    mmio_init();
 }
 
 /**
@@ -246,7 +269,8 @@ unsigned long page_init(struct Page *page, ul flags)
     {
         ++page->ref_counts;
         barrier();
-        ++page->zone->total_pages_link;
+        if (page->zone)
+            ++page->zone->total_pages_link;
     }
     page->anon_vma = NULL;
     spin_init(&(page->op_lock));
@@ -591,7 +615,8 @@ uint64_t mm_do_brk(uint64_t old_brk_end_addr, int64_t offset)
         {
             struct vm_area_struct *vma = NULL;
             mm_create_vma(current_pcb->mm, i, PAGE_2M_SIZE, VM_USER | VM_ACCESS_FLAGS, NULL, &vma);
-            mm_map_vma(vma, alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys);
+            mm_map(current_pcb->mm, i, PAGE_2M_SIZE, alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys);
+            // mm_map_vma(vma, alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys, 0, PAGE_2M_SIZE);
         }
         current_pcb->mm->brk_end = end_addr;
     }
@@ -618,4 +643,20 @@ uint64_t mm_do_brk(uint64_t old_brk_end_addr, int64_t offset)
         // 在页表中取消映射
     }
     return end_addr;
+}
+
+/**
+ * @brief 创建mmio对应的页结构体
+ *
+ * @param paddr 物理地址
+ * @return struct Page* 创建成功的page
+ */
+struct Page *__create_mmio_page_struct(uint64_t paddr)
+{
+    struct Page *p = (struct Page *)kzalloc(sizeof(struct Page), 0);
+    if (p == NULL)
+        return NULL;
+    p->addr_phys = paddr;
+    page_init(p, PAGE_DEVICE);
+    return p;
 }

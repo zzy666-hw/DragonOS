@@ -26,18 +26,17 @@ void nanosleep_handler(void *pcb)
  */
 int nanosleep(const struct timespec *rqtp, struct timespec *rmtp)
 {
-    int64_t total_ns = rqtp->tv_nsec;
 
-    if (total_ns < 0 || total_ns >= 1000000000)
+    if (rqtp->tv_nsec < 0 || rqtp->tv_nsec >= 1000000000)
         return -EINVAL;
 
+
     // 对于小于500us的时间，使用spin/rdtsc来进行定时
-    if (total_ns < 500000)
+    if (rqtp->tv_nsec < 500000)
     {
-        kdebug("use rdtsc to nanosleep");
-        uint64_t expired_tsc = rdtsc() + (total_ns * Cpu_tsc_freq) / 1000000000;
+        uint64_t expired_tsc = rdtsc() + (((uint64_t)rqtp->tv_nsec) * Cpu_tsc_freq) / 1000000000;
         while (rdtsc() < expired_tsc)
-            pause();
+            ;
 
         if (rmtp != NULL)
         {
@@ -51,13 +50,13 @@ int nanosleep(const struct timespec *rqtp, struct timespec *rmtp)
     struct timer_func_list_t *sleep_task = (struct timer_func_list_t *)kmalloc(sizeof(struct timer_func_list_t), 0);
     memset(sleep_task, 0, sizeof(struct timer_func_list_t));
 
-    timer_func_init_us(sleep_task, &nanosleep_handler, (void *)current_pcb, total_ns / 1000);
+    timer_func_init_us(sleep_task, &nanosleep_handler, (void *)current_pcb, rqtp->tv_nsec / 1000);
 
     timer_func_add(sleep_task);
 
     current_pcb->state = PROC_INTERRUPTIBLE;
     current_pcb->flags |= PF_NEED_SCHED;
-    sched_cfs();
+    sched();
 
     // todo: 增加信号唤醒的功能后，设置rmtp
 

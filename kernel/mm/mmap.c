@@ -2,6 +2,7 @@
 #include "slab.h"
 #include "internal.h"
 #include <common/compiler.h>
+#include <debug/bug.h>
 
 extern uint64_t mm_total_2M_pages;
 
@@ -319,6 +320,10 @@ void mm_unmap_proc_table(ul proc_page_table_addr, bool is_phys, ul virt_addr_sta
 int mm_create_vma(struct mm_struct *mm, uint64_t vaddr, uint64_t length, vm_flags_t vm_flags, struct vm_operations_t *vm_ops, struct vm_area_struct **res_vma)
 {
     int retval = 0;
+    // 输入的地址如果不是4K对齐，则报错
+    if (unlikely(vaddr & (PAGE_4K_SIZE - 1)))
+        return -EINVAL;
+
     struct vm_area_struct *vma = vm_area_alloc(mm);
     if (unlikely(vma == NULL))
         return -ENOMEM;
@@ -326,16 +331,20 @@ int mm_create_vma(struct mm_struct *mm, uint64_t vaddr, uint64_t length, vm_flag
     vma->vm_flags = vm_flags;
     vma->vm_start = vaddr;
     vma->vm_end = vaddr + length;
-
     // 将VMA加入mm的链表
     retval = vma_insert(mm, vma);
-    if (retval == -EEXIST) // 之前已经存在了相同的vma，直接返回
+    if (retval == -EEXIST || retval == __VMA_MERGED) // 之前已经存在了相同的vma，直接返回
     {
         *res_vma = vma_find(mm, vma->vm_start);
         kfree(vma);
-        return -EEXIST;
+        if (retval == -EEXIST)
+            return -EEXIST;
+        else
+            return 0;
     }
-    *res_vma = vma;
+
+    if (res_vma != NULL)
+        *res_vma = vma;
     return 0;
 }
 
@@ -344,13 +353,30 @@ int mm_create_vma(struct mm_struct *mm, uint64_t vaddr, uint64_t length, vm_flag
  *
  * @param vma 要进行映射的VMA结构体
  * @param paddr 起始物理地址
+ * @param offset 要映射的起始位置在vma中的偏移量
+ * @param length 要映射的长度
  * @return int 错误码
  */
-int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr)
+int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr, uint64_t offset, uint64_t length)
 {
-    int retval = 0;
+   int retval = 0;
+    uint64_t mapped = 0;
+    BUG_ON((offset & (PAGE_4K_SIZE - 1)) != 0);
+    length = PAGE_4K_ALIGN(length); // 将length按照4K进行对齐
     // 获取物理地址对应的页面
-    struct Page *pg = Phy_to_2M_Page(paddr);
+    struct Page *pg;
+    uint64_t page_flags = 0;
+    if (vma->vm_flags & VM_IO) // 对于mmio的内存，创建新的page结构体
+    {
+        page_flags = PAGE_PWT | PAGE_PCD;
+        if (unlikely(vma->anon_vma == NULL || vma->anon_vma->page == NULL))
+            pg = __create_mmio_page_struct(paddr);
+        else
+            pg = vma->anon_vma->page;
+    }
+    else
+        pg = Phy_to_2M_Page(paddr);
+
     if (unlikely(pg->anon_vma == NULL)) // 若页面不存在anon_vma，则为页面创建anon_vma
     {
         spin_lock(&pg->op_lock);
@@ -362,50 +388,120 @@ int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr)
     // 将anon vma与vma进行绑定
     __anon_vma_add(pg->anon_vma, vma);
     barrier();
-
-    uint64_t length = vma->vm_end - vma->vm_start;
-    // ==== 将地址映射到页表 ====
-    uint64_t len_4k = length % PAGE_2M_SIZE;
-    uint64_t len_2m = length - len_4k;
+    // 长度超过界限
+    BUG_ON(vma->vm_start + offset + length > vma->vm_end);
 
     /*
         todo: 限制页面的读写权限
     */
 
-    // 先映射2M页
+    // ==== 将地址映射到页表 ====
+    uint64_t len_4k, len_2m;
+    // 将地址使用4k页填补，使得地址按照2M对齐
+    len_4k = PAGE_2M_ALIGN(vma->vm_start + offset) - (vma->vm_start + offset);
+    if (len_4k > 0)
+        len_4k = (len_4k > length) ? length : len_4k;
+    if (len_4k)
+    {
+        if (vma->vm_flags & VM_USER)
+            page_flags |= PAGE_USER_4K_PAGE;
+        else
+            page_flags |= PAGE_KERNEL_4K_PAGE;
+
+        // 这里直接设置user标志位为false，因为该函数内部会对其进行自动校正
+        retval = mm_map_proc_page_table((uint64_t)vma->vm_mm->pgd, true, vma->vm_start + offset, paddr, len_4k, page_flags, false, false, true);
+        if (unlikely(retval != 0))
+            goto failed;
+
+        mapped += len_4k;
+        length -= len_4k;
+    }
+
+    len_4k = length % PAGE_2M_SIZE;
+    len_2m = length / PAGE_2M_SIZE;
+
+    // 映射连续的2M页
     if (likely(len_2m > 0))
     {
-        uint64_t page_flags = 0;
         if (vma->vm_flags & VM_USER)
-            page_flags = PAGE_USER_PAGE;
+            page_flags |= PAGE_USER_PAGE;
         else
-            page_flags = PAGE_KERNEL_PAGE;
+            page_flags |= PAGE_KERNEL_PAGE;
         // 这里直接设置user标志位为false，因为该函数内部会对其进行自动校正
-        retval = mm_map_proc_page_table((uint64_t)vma->vm_mm->pgd, true, vma->vm_start, paddr, len_2m, page_flags, false, false, false);
+        retval = mm_map_proc_page_table((uint64_t)vma->vm_mm->pgd, true, vma->vm_start + offset + mapped, paddr + mapped, len_2m, page_flags, false, false, false);
+
         if (unlikely(retval != 0))
             goto failed;
+        mapped += len_2m;
     }
-
+    // 最后再使用4K页填补
     if (likely(len_4k > 0))
     {
-        len_4k = ALIGN(len_4k, PAGE_4K_SIZE);
 
-        uint64_t page_flags = 0;
         if (vma->vm_flags & VM_USER)
-            page_flags = PAGE_USER_4K_PAGE;
+            page_flags |= PAGE_USER_4K_PAGE;
         else
-            page_flags = PAGE_KERNEL_4K_PAGE;
+            page_flags |= PAGE_KERNEL_4K_PAGE;
+
         // 这里直接设置user标志位为false，因为该函数内部会对其进行自动校正
-        retval = mm_map_proc_page_table((uint64_t)vma->vm_mm->pgd, true, vma->vm_start + len_2m, paddr + len_2m, len_4k, page_flags, false, false, true);
+        retval = mm_map_proc_page_table((uint64_t)vma->vm_mm->pgd, true, vma->vm_start + offset + mapped, paddr + mapped, len_4k, page_flags, false, false, true);
+
         if (unlikely(retval != 0))
             goto failed;
+        mapped += len_4k;
     }
-    // 计算当前vma的起始地址在对应的物理页中的偏移量
-    vma->page_offset = paddr - (paddr & PAGE_2M_MASK);
+
+    if (vma->vm_flags & VM_IO)
+        vma->page_offset = 0;
+
     flush_tlb();
     return 0;
 failed:;
     kdebug("map VMA failed.");
+    return retval;
+}
+
+/**
+ * @brief 在页表中映射物理地址到指定的虚拟地址（需要页表中已存在对应的vma）
+ *
+ * @param mm 内存管理结构体
+ * @param vaddr 虚拟地址
+ * @param length 长度（字节）
+ * @param paddr 物理地址
+ * @return int 返回码
+ */
+int mm_map(struct mm_struct *mm, uint64_t vaddr, uint64_t length, uint64_t paddr)
+{
+    int retval = 0;
+    uint64_t offset = 0;
+    for (uint64_t mapped = 0; mapped < length;)
+    {
+
+        struct vm_area_struct *vma = vma_find(mm, vaddr + mapped);
+        if (unlikely(vma == NULL))
+        {
+            kerror("Map addr failed: vma not found. At address: %#018lx, pid=%ld", vaddr + mapped, current_pcb->pid);
+            return -EINVAL;
+        }
+
+        // if (unlikely(vma->vm_start != (vaddr + mapped)))
+        // {
+        //     kerror("Map addr failed: addr_start is not equal to current: %#018lx.", vaddr + mapped);
+        //     return -EINVAL;
+        // }
+
+        offset = vaddr + mapped - vma->vm_start;
+        uint64_t m_len = vma->vm_end - vma->vm_start - offset;
+        // kdebug("start=%#018lx, offset=%ld", vma->vm_start, offset);
+        retval = mm_map_vma(vma, paddr + mapped, offset, m_len);
+        if (unlikely(retval != 0))
+            goto failed;
+
+        mapped += m_len;
+    }
+    return 0;
+failed:;
+    kerror("Map addr failed.");
     return retval;
 }
 
@@ -417,15 +513,70 @@ failed:;
  * @param paddr 返回的被取消映射的起始物理地址
  * @return int 返回码
  */
-int mm_umap_vma(struct mm_struct *mm, struct vm_area_struct *vma, uint64_t *paddr)
+int mm_unmap_vma(struct mm_struct *mm, struct vm_area_struct *vma, uint64_t *paddr)
 {
     // 确保vma对应的mm与指定的mm相一致
     if (unlikely(vma->vm_mm != mm))
         return -EINVAL;
-
+    struct anon_vma_t *anon = vma->anon_vma;
     if (paddr != NULL)
         *paddr = __mm_get_paddr(mm, vma->vm_start);
+    if (anon == NULL)
+        kwarn("anon is NULL");
+    semaphore_down(&anon->sem);
 
     mm_unmap_proc_table((uint64_t)mm->pgd, true, vma->vm_start, vma->vm_end - vma->vm_start);
+    __anon_vma_del(vma);
+    /** todo: 这里应该会存在bug，应修复。
+     * 若anon_vma的等待队列上有其他的进程，由于anon_vma被释放
+     * 这些在等待队列上的进程将无法被唤醒。
+     */
+    list_init(&vma->anon_vma_list);
+
+    semaphore_up(&anon->sem);
+
     return 0;
+}
+
+/**
+ * @brief 解除一段虚拟地址的映射（这些地址必须在vma中存在）
+ *
+ * @param mm 内存空间结构体
+ * @param vaddr 起始地址
+ * @param length 结束地址
+ * @param destroy 是否释放vma结构体
+ * @return int 错误码
+ */
+int mm_unmap(struct mm_struct *mm, uint64_t vaddr, uint64_t length, bool destroy)
+{
+    int retval = 0;
+    for (uint64_t unmapped = 0; unmapped < length;)
+    {
+        struct vm_area_struct *vma = vma_find(mm, vaddr + unmapped);
+        if (unlikely(vma == NULL))
+        {
+            kerror("Unmap addr failed: vma not found. At address: %#018lx, pid=%ld", vaddr + unmapped, current_pcb->pid);
+            return -EINVAL;
+        }
+
+        if (unlikely(vma->vm_start != (vaddr + unmapped)))
+        {
+            kerror("Unmap addr failed: addr_start is not equal to current: %#018lx.", vaddr + unmapped);
+            return -EINVAL;
+        }
+        if (vma->anon_vma != NULL)
+            mm_unmap_vma(mm, vma, NULL);
+
+        unmapped += vma->vm_end - vma->vm_start;
+        // 释放vma结构体
+        if (destroy)
+        {
+            vm_area_del(vma);
+            vm_area_free(vma);
+        }
+    }
+    return 0;
+failed:;
+    kerror("Unmap addr failed.");
+    return retval;
 }

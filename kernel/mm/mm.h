@@ -13,6 +13,9 @@
 #define PAGE_OFFSET (0xffff800000000000UL)
 #define KERNEL_BASE_LINEAR_ADDR (0xffff800000000000UL)
 #define USER_MAX_LINEAR_ADDR 0x00007fffffffffffUL
+// MMIO虚拟地址空间：1TB
+#define MMIO_BASE (0xffffa10000000000UL)
+#define MMIO_TOP (0xffffa20000000000UL)
 
 #define PAGE_4K_SHIFT 12
 #define PAGE_2M_SHIFT 21
@@ -42,8 +45,6 @@
 // 在这个地址以上的虚拟空间，用来进行特殊的映射
 #define SPECIAL_MEMOEY_MAPPING_VIRT_ADDR_BASE 0xffffa00000000000UL
 #define FRAME_BUFFER_MAPPING_OFFSET 0x3000000UL
-#define ACPI_RSDT_MAPPING_OFFSET 0x7000000UL
-#define ACPI_XSDT_MAPPING_OFFSET 0x9000000UL
 #define IO_APIC_MAPPING_OFFSET 0xfec00000UL
 #define LOCAL_APIC_MAPPING_OFFSET 0xfee00000UL
 #define AHCI_MAPPING_OFFSET 0xff200000UL // AHCI 映射偏移量,之后使用了4M的地址
@@ -439,7 +440,7 @@ void mm_unmap_proc_table(ul proc_page_table_addr, bool is_phys, ul virt_addr_sta
  * @param virt_addr 虚拟地址
  * @param length 地址长度
  */
-#define mm_unmap(virt_addr, length) ({                                 \
+#define mm_unmap_addr(virt_addr, length) ({                            \
     mm_unmap_proc_table((uint64_t)get_CR3(), true, virt_addr, length); \
 })
 
@@ -461,9 +462,22 @@ int mm_create_vma(struct mm_struct *mm, uint64_t vaddr, uint64_t length, vm_flag
  *
  * @param vma 要进行映射的VMA结构体
  * @param paddr 起始物理地址
+ * @param offset 要映射的起始位置在vma中的偏移量
+ * @param length 要映射的长度
  * @return int 错误码
  */
-int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr);
+int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr, uint64_t offset, uint64_t length);
+
+/**
+ * @brief 在页表中映射物理地址到指定的虚拟地址（需要页表中已存在对应的vma）
+ *
+ * @param mm 内存管理结构体
+ * @param vaddr 虚拟地址
+ * @param length 长度（字节）
+ * @param paddr 物理地址
+ * @return int 返回码
+ */
+int mm_map(struct mm_struct *mm, uint64_t vaddr, uint64_t length, uint64_t paddr);
 
 /**
  * @brief 在页表中取消指定的vma的映射
@@ -473,7 +487,18 @@ int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr);
  * @param paddr 返回的被取消映射的起始物理地址
  * @return int 返回码
  */
-int mm_umap_vma(struct mm_struct *mm, struct vm_area_struct *vma, uint64_t *paddr);
+int mm_unmap_vma(struct mm_struct *mm, struct vm_area_struct *vma, uint64_t *paddr);
+
+/**
+ * @brief 解除一段虚拟地址的映射（这些地址必须在vma中存在）
+ *
+ * @param mm 内存空间结构体
+ * @param vaddr 起始地址
+ * @param length 结束地址
+ * @param destroy 是否释放vma结构体
+ * @return int 错误码
+ */
+int mm_unmap(struct mm_struct *mm, uint64_t vaddr, uint64_t length, bool destroy);
 
 /**
  * @brief 检测是否为有效的2M页(物理内存页)

@@ -22,8 +22,8 @@ kernel_subdirs := common driver process debug filesystem time arch exception mm 
 
 
 head.o: head.S
-	gcc -E head.S > head.s # 预处理
-	as $(ASFLAGS) -o head.o head.s
+	gcc -E head.S > _head.s # 预处理
+	as $(ASFLAGS) -o head.o _head.s
 
 
 main.o: main.c 
@@ -42,6 +42,9 @@ all: kernel
 		cd $$x;\
 		$(MAKE) generate_kallsyms kernel_root_path="$(shell pwd)";\
 		cd ..;\
+		if [ "$$?" != "0" ]; then\
+            exit $$?;\
+        fi;\
 	done
 	
 # 重新链接
@@ -50,7 +53,7 @@ all: kernel
 	@echo "Generating kernel ELF file..."
 # 生成内核文件
 	objcopy -I elf64-x86-64 -O elf64-x86-64 -R ".comment" -R ".eh_frame" kernel ../bin/kernel/kernel.elf
-	@echo "Done."
+	@echo "Kernel Build Done."
 
 ECHO:
 	@echo "$@"
@@ -58,7 +61,6 @@ ECHO:
 $(kernel_subdirs): ECHO
 
 	$(MAKE) -C $@ all CFLAGS="$(CFLAGS)" ASFLAGS="$(ASFLAGS)" PIC="$(PIC)" kernel_root_path="$(shell pwd)"
-
 
 kernel: head.o main.o $(kernel_subdirs)
 	

@@ -209,8 +209,9 @@ int shell_cmd_cd(int argc, char **argv)
         if (current_dir_len > 1)
             new_path[current_dir_len] = '/';
         strcat(new_path, argv[1] + dest_offset);
+        int x = chdir(new_path);
 
-        if (chdir(new_path) == 0) // 成功切换目录
+        if (x == 0) // 成功切换目录
         {
             free(shell_current_path);
             // printf("new_path=%s, newlen= %d\n", new_path, new_len);
@@ -256,10 +257,12 @@ int shell_cmd_ls(int argc, char **argv)
             break;
 
         int color = COLOR_WHITE;
-        if (buf->d_type & VFS_ATTR_DIR)
+        if (buf->d_type & VFS_IF_DIR)
             color = COLOR_YELLOW;
-        else if (buf->d_type & VFS_ATTR_FILE)
+        else if (buf->d_type & VFS_IF_FILE)
             color = COLOR_INDIGO;
+        else if (buf->d_type & VFS_IF_DEVICE)
+            color = COLOR_GREEN;
 
         char output_buf[256] = {0};
 
@@ -385,7 +388,7 @@ int shell_cmd_mkdir(int argc, char **argv)
     {
         full_path = get_target_filepath(argv[1], &result_path_len);
     }
-    printf("mkdir: full_path = %s\n", full_path);
+    // printf("mkdir: full_path = %s\n", full_path);
     int retval = mkdir(full_path, 0);
 
     if (argv != NULL)
@@ -402,7 +405,21 @@ int shell_cmd_mkdir(int argc, char **argv)
  * @return int
  */
 // todo:
-int shell_cmd_rmdir(int argc, char **argv) {}
+int shell_cmd_rmdir(int argc, char **argv)
+{
+    const char *full_path = NULL;
+    int result_path_len = -1;
+    if (argv[1][0] == '/')
+        full_path = argv[1];
+    else
+        full_path = get_target_filepath(argv[1], &result_path_len);
+    int retval = rmdir(full_path);
+    // printf("rmdir: path=%s, retval=%d\n", full_path, retval);
+    if (argv != NULL)
+        free(argv);
+
+    return retval;
+}
 
 /**
  * @brief 执行新的程序的命令
@@ -480,7 +497,7 @@ int shell_cmd_free(int argc, char **argv)
 
     struct mstat_t mst = {0};
     retval = mstat(&mst);
-    if(retval!=0)
+    if (retval != 0)
     {
         printf("Failed: retval=%d", retval);
         goto done;
@@ -488,15 +505,15 @@ int shell_cmd_free(int argc, char **argv)
 
     printf("\ttotal\tused\tfree\tshared\tcache\tavailable\n");
     printf("Mem:\t");
-    if(argc==1) // 按照kb显示
+    if (argc == 1) // 按照kb显示
     {
-        printf("%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t\n", mst.total>>10,mst.used>>10,mst.free>>10, mst.shared>>10, mst.cache_used>>10, mst.available>>10);
+        printf("%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t\n", mst.total >> 10, mst.used >> 10, mst.free >> 10, mst.shared >> 10, mst.cache_used >> 10, mst.available >> 10);
     }
-    else    // 按照MB显示
+    else // 按照MB显示
     {
-        printf("%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t\n", mst.total>>20,mst.used>>20,mst.free>>20, mst.shared>>20, mst.cache_used>>20, mst.available>>20);
+        printf("%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t\n", mst.total >> 20, mst.used >> 20, mst.free >> 20, mst.shared >> 20, mst.cache_used >> 20, mst.available >> 20);
     }
-    
+
 done:;
     if (argv != NULL)
         free(argv);

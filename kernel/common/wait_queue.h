@@ -36,6 +36,13 @@ void wait_queue_sleep_on(wait_queue_node_t * wait_queue_head);
 void wait_queue_sleep_on_unlock(wait_queue_node_t *wait_queue_head,
                                 void *lock);
 /**
+ * @brief 在等待队列上进行等待,同时释放自旋锁
+ * 
+ * @param wait_queue_head 队列头指针
+ */
+void wait_queue_sleep_on_unlock(wait_queue_node_t *wait_queue_head,
+                                void *lock);
+/**
  * @brief 在等待队列上进行等待(允许中断)
  * 
  * @param wait_queue_head 队列头指针

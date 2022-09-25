@@ -7,6 +7,23 @@ fi
 GENERATE_ISO=0
 IN_DOCKER=0
 
+IA32_USE_QEMU=1
+bochsrc="./bochsrc"
+ARCH="x86_64"
+
+for i in "$@"
+do
+    if [ $i == "--no-qemu" ];then
+        IA32_USE_QEMU=0
+    fi
+done
+
+if [ ${IA32_USE_QEMU} == "1" ];then
+    export EMULATOR=__QEMU_EMULATION__
+else
+    export EMULATOR=__NO_EMULATION__
+fi
+
 # 第一个参数如果是--notbuild 那就不构建，直接运行
 if [ ! "$1" == "--nobuild" ]; then
     echo "开始构建..."
@@ -18,19 +35,24 @@ if [ ! "$1" == "--nobuild" ]; then
         echo "运行在docker内"
         IN_DOCKER=1
         make all -j 16
+        if [ "$?" != "0" ]; then\
+            echo "DragonOS编译失败";\
+            exit 1;\
+        fi;\
         make clean
         GENERATE_ISO=1
     else
         
         make all -j 16
+        if [ "$?" != "0" ]; then\
+            echo "DragonOS编译失败";\
+            exit 1;\
+        fi;\
         make clean
         GENERATE_ISO=1
     fi
 fi
 
-IA32_USE_QEMU=1
-bochsrc="./bochsrc"
-ARCH="x86_64"
 
 # 内核映像
 root_folder="$(pwd)"
@@ -85,8 +107,8 @@ if [ "${GENERATE_ISO}" == "1" ]; then
     bash mount_virt_disk.sh || exit 1
     mkdir -p ${boot_folder}/grub
     cp ${kernel} ${root_folder}/bin/disk_mount/boot
-    cp ${root_folder}/bin/user/shell.elf ${root_folder}/bin/disk_mount
-    cp ${root_folder}/bin/user/about.elf ${root_folder}/bin/disk_mount
+    # 拷贝用户程序到磁盘镜像
+    cp -r ${root_folder}/bin/user/* ${root_folder}/bin/disk_mount
     mkdir -p ${root_folder}/bin/disk_mount/dev
     touch ${root_folder}/bin/disk_mount/dev/keyboard.dev
     
@@ -128,11 +150,16 @@ flag_can_run=1
 
 allflags=$(qemu-system-x86_64 -cpu help | awk '/flags/ {y=1; getline}; y {print}' | tr ' ' '\n' | grep -Ev "^$" | sed -r 's|^|+|' | tr '\n' ',' | sed -r "s|,$||")
 
+# 请根据自己的需要，在-d 后方加入所需的trace事件
+
+# 标准的trace events
+qemu_trace_std=cpu_reset,guest_errors,trace:check_exception,exec,cpu
 # 调试usb的trace
-qemu_trace_usb=trace:usb_xhci_reset,trace:usb_xhci_run,trace:usb_xhci_stop,trace:usb_xhci_irq_msi,trace:usb_xhci_irq_msix,trace:usb_xhci_port_reset
+qemu_trace_usb=trace:usb_xhci_reset,trace:usb_xhci_run,trace:usb_xhci_stop,trace:usb_xhci_irq_msi,trace:usb_xhci_irq_msix,trace:usb_xhci_port_reset,trace:msix_write_config,trace:usb_xhci_irq_msix,trace:usb_xhci_irq_msix_use,trace:usb_xhci_irq_msix_unuse,trace:usb_xhci_irq_msi,trace:usb_xhci_*
+
 
 qemu_accel=kvm
-if [ "${OS}" == "Darwin" ]; then
+if [ $(uname) == Darwin ]; then
     qemu_accel=hvf
 fi
 
@@ -142,7 +169,7 @@ if [ $flag_can_run -eq 1 ]; then
     else
         qemu-system-x86_64 -d bin/disk.img -m 512M -smp 2,cores=2,threads=1,sockets=1 \
         -boot order=d   \
-        -monitor stdio -d cpu_reset,guest_errors,trace:check_exception,exec,cpu,out_asm,in_asm,${qemu_trace_usb} \
+        -monitor stdio -d ${qemu_trace_std} \
         -s -S -cpu IvyBridge,apic,x2apic,+fpu,check,${allflags} -rtc clock=host,base=localtime -serial file:serial_opt.txt \
         -drive id=disk,file=bin/disk.img,if=none \
         -device ahci,id=ahci \

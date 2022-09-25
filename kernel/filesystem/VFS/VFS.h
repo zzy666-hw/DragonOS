@@ -13,8 +13,10 @@
 
 #include <common/glib.h>
 #include <common/fcntl.h>
+#include <common/blk_types.h>
+#include <mm/slab.h>
 
-struct vfs_superblock_t *vfs_root_sb = NULL;
+extern struct vfs_superblock_t *vfs_root_sb;
 
 #define VFS_DPT_MBR 0 // MBR分区表
 #define VFS_DPT_GPT 1 // GPT分区表
@@ -23,13 +25,16 @@ struct vfs_superblock_t *vfs_root_sb = NULL;
 #define VFS_E_FS_EXISTED 1   // 错误：文件系统已存在
 #define VFS_E_FS_NOT_EXIST 2 // 错误：文件系统不存在
 
+#define VFS_MAX_PATHLEN 1024
+
 /**
- * @brief 目录项的属性
+ * @brief inode的属性
  *
  */
-#define VFS_ATTR_FILE (1UL << 0)
-#define VFS_ATTR_DIR (1UL << 1)
-#define VFS_ATTR_DEVICE (1UL << 2)
+#define VFS_IF_FILE (1UL << 0)
+#define VFS_IF_DIR (1UL << 1)
+#define VFS_IF_DEVICE (1UL << 2)
+#define VFS_IF_DEAD (1UL << 3) /* removed, but still open directory */
 
 struct vfs_super_block_operations_t;
 struct vfs_inode_operations_t;
@@ -37,10 +42,13 @@ struct vfs_inode_operations_t;
 struct vfs_index_node_t;
 struct vfs_dir_entry_operations_t;
 
+#define VFS_DF_MOUNTED (1 << 0)      // 当前dentry是一个挂载点
+#define VFS_DF_CANNOT_MOUNT (1 << 1) // 当前dentry是一个挂载点
 struct vfs_dir_entry_t
 {
     char *name;
-    int name_length;
+    int name_length;  // 名字的长度（不包含字符串末尾的'\0'）
+    uint32_t d_flags; // dentry标志位
     struct List child_node_list;
     struct List subdirs_list;
 
@@ -53,6 +61,8 @@ struct vfs_superblock_t
 {
     struct vfs_dir_entry_t *root;
     struct vfs_super_block_operations_t *sb_ops;
+    struct vfs_dir_entry_operations_t *dir_ops; // dentry's operations
+    struct block_device *blk_device;
     void *private_sb_info;
 };
 
@@ -65,6 +75,7 @@ struct vfs_index_node_t
     uint64_t file_size; // 文件大小
     uint64_t blocks;    // 占用的扇区数
     uint64_t attribute;
+    int32_t ref_count; // 引用计数
 
     struct vfs_superblock_t *sb;
     struct vfs_file_operations_t *file_ops;
@@ -72,6 +83,18 @@ struct vfs_index_node_t
 
     void *private_inode_info;
 };
+
+/**
+ * @brief 文件的mode
+ *
+ */
+#define VFS_FILE_MODE_READ (1 << 0)
+#define VFS_FILE_MODE_WRITE (1 << 1)
+#define VFS_FILE_MODE_RW (VFS_FILE_MODE_READ | VFS_FILE_MODE_WRITE)
+
+#define vfs_file_can_read(file) (((file)->mode) & VFS_FILE_MODE_READ)
+#define vfs_file_can_write(file) (((file)->mode) & VFS_FILE_MODE_WRITE)
+#define vfs_file_can_rw(file) ((((file)->mode) & VFS_FILE_MODE_RW) == VFS_FILE_MODE_RW)
 
 /**
  * @brief 文件描述符
@@ -91,7 +114,7 @@ struct vfs_filesystem_type_t
 {
     char *name;
     int fs_flags;
-    struct vfs_superblock_t *(*read_superblock)(void *DPTE, uint8_t DPT_type, void *buf, int8_t ahci_ctrl_num, int8_t ahci_port_num, int8_t part_num); // 解析文件系统引导扇区的函数，为文件系统创建超级块结构。其中DPTE为磁盘分区表entry（MBR、GPT不同）
+    struct vfs_superblock_t *(*read_superblock)(struct block_device *blk); // 解析文件系统引导扇区的函数，为文件系统创建超级块结构。
     struct vfs_filesystem_type_t *next;
 };
 
@@ -173,13 +196,12 @@ uint64_t vfs_unregister_filesystem(struct vfs_filesystem_type_t *fs);
 /**
  * @brief 挂载文件系统
  *
+ * @param path 要挂载到的路径
  * @param name 文件系统名
- * @param DPTE 分区表entry
- * @param DPT_type 分区表类型
- * @param buf 文件系统的引导扇区
- * @return struct vfs_superblock_t*
+ * @param blk 块设备结构体
+ * @return struct vfs_superblock_t* 挂载后，文件系统的超级块
  */
-struct vfs_superblock_t *vfs_mount_fs(char *name, void *DPTE, uint8_t DPT_type, void *buf, int8_t ahci_ctrl_num, int8_t ahci_port_num, int8_t part_num);
+struct vfs_superblock_t *vfs_mount_fs(const char *path, char *name, struct block_device *blk);
 
 /**
  * @brief 按照路径查找文件
@@ -194,4 +216,54 @@ struct vfs_dir_entry_t *vfs_path_walk(const char *path, uint64_t flags);
  * @brief 填充dentry
  *
  */
-int vfs_fill_dentry(void *buf, ino_t d_ino, char *name, int namelen, unsigned char type, off_t offset);
+int vfs_fill_dirent(void *buf, ino_t d_ino, char *name, int namelen, unsigned char type, off_t offset);
+
+/**
+ * @brief 初始化vfs
+ *
+ * @return int 错误码
+ */
+int vfs_init();
+
+/**
+ * @brief 动态分配dentry以及路径字符串名称
+ *
+ * @param name_size 名称字符串大小（字节）(注意考虑字符串最后需要有一个‘\0’作为结尾)
+ * @return struct vfs_dir_entry_t* 创建好的dentry
+ */
+struct vfs_dir_entry_t *vfs_alloc_dentry(const int name_size);
+
+/**
+ * @brief 分配inode并将引用计数初始化为1
+ *
+ * @return struct vfs_index_node_t * 分配得到的inode
+ */
+struct vfs_index_node_t *vfs_alloc_inode();
+
+/**
+ * @brief 打开文件
+ *
+ * @param filename 文件路径
+ * @param flags 标志位
+ * @return uint64_t 错误码
+ */
+uint64_t do_open(const char *filename, int flags);
+
+/**
+ * @brief 创建文件夹
+ *
+ * @param path 文件夹路径
+ * @param mode 创建模式
+ * @param from_userland 该创建请求是否来自用户态
+ * @return int64_t 错误码
+ */
+int64_t vfs_mkdir(const char *path, mode_t mode, bool from_userland);
+
+/**
+ * @brief 删除文件夹
+ *
+ * @param path 文件夹路径
+ * @param from_userland 请求是否来自用户态
+ * @return int64_t 错误码
+ */
+int64_t vfs_rmdir(const char *path, bool from_userland);

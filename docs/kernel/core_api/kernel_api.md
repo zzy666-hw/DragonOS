@@ -311,3 +311,78 @@
 **...**
 
 &emsp;&emsp;可变参数
+
+### 内存操作
+
+#### `void *memcpy(void *dst, const void *src, uint64_t size)`
+
+##### 描述
+
+&emsp;&emsp;将内存从src处拷贝到dst处。
+
+##### 参数
+
+**dst**
+
+&emsp;&emsp;指向目标地址的指针
+
+**src**
+
+&emsp;&emsp;指向源地址的指针
+
+**size**
+
+&emsp;&emsp;待拷贝的数据大小
+
+#### `void *memmove(void *dst, const void *src, uint64_t size)`
+
+##### 描述
+
+&emsp;&emsp;与`memcpy()`类似，但是在源数据区域与目标数据区域之间存在重合时，该函数能防止数据被错误的覆盖。
+
+##### 参数
+
+**dst**
+
+&emsp;&emsp;指向目标地址的指针
+
+**src**
+
+&emsp;&emsp;指向源地址的指针
+
+**size**
+
+&emsp;&emsp;待拷贝的数据大小
+
+## CRC函数
+
+### 函数列表
+
+**`uint8_t crc7(uint8_t crc, const uint8_t *buffer, size_t len)`**
+
+**`uint8_t crc8(uint8_t crc, const uint8_t *buffer, size_t len)`**
+
+**`uint16_t crc16(uint16_t crc, uint8_t const *buffer, size_t len)`**
+
+**`uint32_t crc32(uint32_t crc, uint8_t const *buffer, size_t len)`**
+
+**`uint64_t crc64(uint64_t crc, uint8_t const *buffer, size_t len)`**
+
+### 描述
+
+&emsp;&emsp;用于计算循环冗余校验码
+
+### 参数说明
+
+**crc**
+
+&emsp;&emsp;传入的CRC初始值
+
+**buffer**
+
+&emsp;&emsp;待处理的数据缓冲区
+
+**len**
+
+&emsp;&emsp;缓冲区大小（字节）
+

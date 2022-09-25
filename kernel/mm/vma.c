@@ -122,21 +122,35 @@ int vma_insert(struct mm_struct *mm, struct vm_area_struct *vma)
 {
 
     struct vm_area_struct *prev;
+
     prev = vma_find(mm, vma->vm_start);
+    
     if (prev && prev->vm_start <= vma->vm_start && prev->vm_end >= vma->vm_end)
     {
         // 已经存在了相同的vma
         return -EEXIST;
     }
-    else if (prev && (prev->vm_start == vma->vm_start || prev->vm_end == vma->vm_end)) // 暂时不支持扩展vma
+    // todo: bugfix: 这里的第二种情况貌似从来不会满足
+    else if (prev && ((vma->vm_start >= prev->vm_start && vma->vm_start <= prev->vm_end) || (prev->vm_start <= vma->vm_end && prev->vm_start >= vma->vm_start)))    
     {
-        kwarn("Not support: expand vma");
-        return -ENOTSUP;
+        //部分重叠
+        if ((!CROSS_2M_BOUND(vma->vm_start, prev->vm_start)) && (!CROSS_2M_BOUND(vma->vm_end, prev->vm_end))&& vma->vm_end)
+        {
+            //合并vma 并改变链表vma的范围
+            kdebug("before combining vma:vm_start = %#018lx, vm_end = %#018lx\n", vma->vm_start, vma->vm_end);
+
+            prev->vm_start = (vma->vm_start < prev->vm_start )? vma->vm_start : prev->vm_start;
+            prev->vm_end = (vma->vm_end > prev->vm_end) ? vma->vm_end : prev->vm_end;
+            // 计算page_offset
+            prev->page_offset = prev->vm_start - (prev->vm_start & PAGE_2M_MASK);
+            kdebug("combined vma:vm_start = %#018lx, vm_end = %#018lx\nprev:vm_start = %018lx, vm_end = %018lx\n", vma->vm_start, vma->vm_end, prev->vm_start, prev->vm_end);
+            kinfo("vma has same part\n");
+            return __VMA_MERGED;
+        }
     }
 
-    prev = vma_find(mm, vma->vm_end);
-    if (prev)
-        prev = prev->vm_prev;
+    // prev = vma_find(mm, vma->vm_start);
+
     if (prev == NULL) // 要将当前vma插入到链表的尾部
     {
         struct vm_area_struct *ptr = mm->vmas;
@@ -151,6 +165,8 @@ int vma_insert(struct mm_struct *mm, struct vm_area_struct *vma)
             }
         }
     }
+    else
+        prev = prev->vm_prev;
     __vma_link_list(mm, vma, prev);
     return 0;
 }
@@ -229,7 +245,7 @@ int __anon_vma_free(struct anon_vma_t *anon_vma)
 
 /**
  * @brief 从anon_vma的管理范围中删除指定的vma
- * (在进入这个函数之前，应该要加锁)
+ * (在进入这个函数之前，应该要对anon_vma加锁)
  * @param vma 将要取消对应的anon_vma管理的vma结构体
  * @return int 返回码
  */
@@ -240,16 +256,20 @@ int __anon_vma_del(struct vm_area_struct *vma)
         return -EINVAL;
 
     list_del(&vma->anon_vma_list);
-    semaphore_down(&vma->anon_vma->sem);
     atomic_dec(&vma->anon_vma->ref_count);
 
+    // 若当前anon_vma的引用计数归零，则意味着可以释放内存页
     if (unlikely(atomic_read(&vma->anon_vma->ref_count) == 0)) // 应当释放该anon_vma
     {
+        // 若页面结构体是mmio创建的，则释放页面结构体
+        if (vma->anon_vma->page->attr & PAGE_DEVICE)
+            kfree(vma->anon_vma->page);
+        else
+            free_pages(vma->anon_vma->page, 1);
         __anon_vma_free(vma->anon_vma);
-        // 释放了anon_vma之后，清理当前vma的关联数据
-        vma->anon_vma = NULL;
-        list_init(&vma->anon_vma_list);
     }
-    else
-        semaphore_up(&vma->anon_vma->sem);
+
+    // 清理当前vma的关联数据
+    vma->anon_vma = NULL;
+    list_init(&vma->anon_vma_list);
 }

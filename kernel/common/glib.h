@@ -138,6 +138,26 @@ static inline void list_del(struct List *entry)
     entry->prev->next = entry->next;
 }
 
+/**
+ * @brief 将新的链表结点替换掉旧的链表结点，并使得旧的结点的前后指针均为NULL
+ * 
+ * @param old 要被替换的结点
+ * @param new 新的要换上去的结点
+ */
+static inline void list_replace(struct List* old, struct List * new)
+{
+    if(old->prev!=NULL)
+        old->prev->next=new;
+    new->prev = old->prev;
+    if(old->next!=NULL)
+        old->next->prev = new;
+    new->next = old->next;
+
+    old->prev = NULL;
+    old->next = NULL;
+}
+
+
 static inline bool list_empty(struct List *entry)
 {
     /**
@@ -484,3 +504,82 @@ static inline uint64_t copy_to_user(void *dst, void *src, uint64_t size)
                  : "memory");
     return size;
 }
+
+/**
+ * @brief 这个函数让蜂鸣器发声，目前仅用于真机调试。未来将移除，请勿依赖此函数。
+ *
+ * @param times 发声循环多少遍
+ */
+void __experimental_beep(uint64_t times);
+
+/**
+ * @brief 往指定地址写入8字节
+ * 防止由于编译器优化导致不支持的内存访问类型（尤其是在mmio的时候）
+ *
+ * @param vaddr 虚拟地址
+ * @param value 要写入的值
+ */
+static __always_inline void __write8b(uint64_t vaddr, uint64_t value)
+{
+    asm volatile("movq %%rdx, 0(%%rax)" ::"a"(vaddr), "d"(value)
+                 : "memory");
+
+}
+
+/**
+ * @brief 往指定地址写入4字节
+ * 防止由于编译器优化导致不支持的内存访问类型（尤其是在mmio的时候）
+ *
+ * @param vaddr 虚拟地址
+ * @param value 要写入的值
+ */
+static __always_inline void __write4b(uint64_t vaddr, uint32_t value)
+{
+    asm volatile("movl %%edx, 0(%%rax)" ::"a"(vaddr), "d"(value)
+                 : "memory");
+
+}
+
+/**
+ * @brief 从指定地址读取8字节
+ * 防止由于编译器优化导致不支持的内存访问类型（尤其是在mmio的时候）
+ *
+ * @param vaddr 虚拟地址
+ * @return uint64_t 读取到的值
+ */
+static __always_inline uint64_t __read8b(uint64_t vaddr)
+{
+    uint64_t retval;
+    asm volatile("movq 0(%%rax), %0"
+                 : "=r"(retval)
+                 : "a"(vaddr)
+                 : "memory");
+    return retval;
+}
+
+/**
+ * @brief 从指定地址读取4字节
+ * 防止由于编译器优化导致不支持的内存访问类型（尤其是在mmio的时候）
+ *
+ * @param vaddr 虚拟地址
+ * @return uint64_t 读取到的值
+ */
+static __always_inline uint32_t __read4b(uint64_t vaddr)
+{
+    uint32_t retval;
+    asm volatile("movl 0(%%rax), %0"
+                 : "=d"(retval)
+                 : "a"(vaddr)
+                 : "memory");
+    return retval;
+}
+
+/**
+ * @brief 将数据从src搬运到dst，并能正确处理地址重叠的问题
+ * 
+ * @param dst 目标地址指针
+ * @param src 源地址指针
+ * @param size 大小
+ * @return void* 指向目标地址的指针
+ */
+void *memmove(void *dst, const void *src, uint64_t size);

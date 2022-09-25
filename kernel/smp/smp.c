@@ -13,7 +13,7 @@
 
 void ipi_0xc8_handler(uint64_t irq_num, uint64_t param, struct pt_regs *regs); // 由BSP转发的HPET中断处理函数
 
-static spinlock_t multi_core_starting_lock; // 多核启动锁
+static spinlock_t multi_core_starting_lock = {1}; // 多核启动锁
 
 static struct acpi_Processor_Local_APIC_Structure_t *proc_local_apic_structs[MAX_SUPPORTED_PROCESSOR_NUM];
 static uint32_t total_processor_num = 0;
@@ -35,7 +35,6 @@ void smp_init()
         proc_local_apic_structs[i] = (struct acpi_Processor_Local_APIC_Structure_t *)(tmp_vaddr[i]);
     }
 
-    //*(uchar *)0x20000 = 0xf4; // 在内存的0x20000处写入HLT指令(AP处理器会执行物理地址0x20000的代码)
     // 将引导程序复制到物理地址0x20000处
     memcpy((unsigned char *)phys_2_virt(0x20000), _apu_boot_start, (unsigned long)&_apu_boot_end - (unsigned long)&_apu_boot_start);
     io_mfence();
@@ -43,30 +42,39 @@ void smp_init()
     for (int i = 200; i < 210; ++i)
         set_intr_gate(i, 0, SMP_interrupt_table[i - 200]);
     memset((void *)SMP_IPI_desc, 0, sizeof(irq_desc_t) * SMP_IRQ_NUM);
-    
+
     io_mfence();
 
     // 注册接收bsp处理器的hpet中断转发的处理函数
     ipi_regiserIPI(0xc8, NULL, &ipi_0xc8_handler, NULL, NULL, "IPI 0xc8");
     io_mfence();
-    ipi_send_IPI(DEST_PHYSICAL, IDLE, ICR_LEVEL_DE_ASSERT, EDGE_TRIGGER, 0x00, ICR_INIT, ICR_ALL_EXCLUDE_Self, true, 0x00);
+    ipi_send_IPI(DEST_PHYSICAL, IDLE, ICR_LEVEL_DE_ASSERT, EDGE_TRIGGER, 0x00, ICR_INIT, ICR_ALL_EXCLUDE_Self, 0x00);
+
     kdebug("total_processor_num=%d", total_processor_num);
-    for (int i = 1; i < total_processor_num; ++i) // i从1开始，不初始化bsp
+    kdebug("rflags=%#018lx", get_rflags());
+    // total_processor_num = 3;
+    for (int i = 0; i < total_processor_num; ++i) // i从1开始，不初始化bsp
     {
         io_mfence();
-        if (proc_local_apic_structs[i]->ACPI_Processor_UID == 0)
-            --total_processor_num;
-        io_mfence();
-        if (proc_local_apic_structs[i]->local_apic_id > total_processor_num)
+
+        // 跳过BSP
+        kdebug("[core %d] acpi processor UID=%d, APIC ID=%d, flags=%#010lx", i, proc_local_apic_structs[i]->ACPI_Processor_UID, proc_local_apic_structs[i]->local_apic_id, proc_local_apic_structs[i]->flags);
+        if (proc_local_apic_structs[i]->local_apic_id == 0)
         {
             --total_processor_num;
             continue;
         }
-        kdebug("[core %d] acpi processor UID=%d, APIC ID=%d, flags=%#010lx", i, proc_local_apic_structs[i]->ACPI_Processor_UID, proc_local_apic_structs[i]->local_apic_id, proc_local_apic_structs[i]->flags);
+        if (!((proc_local_apic_structs[i]->flags & 0x1) || (proc_local_apic_structs[i]->flags & 0x2)))
+        {
+            --total_processor_num;
+            kdebug("processor %d cannot be enabled.", proc_local_apic_structs[i]->ACPI_Processor_UID);
+            continue;
+        }
+        // continue;
         io_mfence();
         spin_lock(&multi_core_starting_lock);
         preempt_enable(); // 由于ap处理器的pcb与bsp的不同，因此ap处理器放锁时，bsp的自旋锁持有计数不会发生改变,需要手动恢复preempt count
-        current_starting_cpu = proc_local_apic_structs[i]->local_apic_id;
+        current_starting_cpu = proc_local_apic_structs[i]->ACPI_Processor_UID;
         io_mfence();
         // 为每个AP处理器分配栈空间
         cpu_core_info[current_starting_cpu].stack_start = (uint64_t)kmalloc(STACK_SIZE, 0) + STACK_SIZE;
@@ -89,10 +97,12 @@ void smp_init()
         set_tss64((uint *)cpu_core_info[current_starting_cpu].tss_vaddr, cpu_core_info[current_starting_cpu].stack_start, cpu_core_info[current_starting_cpu].stack_start, cpu_core_info[current_starting_cpu].stack_start,
                   cpu_core_info[current_starting_cpu].ist_stack_start, cpu_core_info[current_starting_cpu].ist_stack_start, cpu_core_info[current_starting_cpu].ist_stack_start, cpu_core_info[current_starting_cpu].ist_stack_start, cpu_core_info[current_starting_cpu].ist_stack_start, cpu_core_info[current_starting_cpu].ist_stack_start, cpu_core_info[current_starting_cpu].ist_stack_start);
         io_mfence();
+
         // 连续发送两次start-up IPI
-        ipi_send_IPI(DEST_PHYSICAL, IDLE, ICR_LEVEL_DE_ASSERT, EDGE_TRIGGER, 0x20, ICR_Start_up, ICR_No_Shorthand, true, proc_local_apic_structs[i]->local_apic_id);
+        ipi_send_IPI(DEST_PHYSICAL, IDLE, ICR_LEVEL_DE_ASSERT, EDGE_TRIGGER, 0x20, ICR_Start_up, ICR_No_Shorthand, proc_local_apic_structs[i]->local_apic_id);
         io_mfence();
-        ipi_send_IPI(DEST_PHYSICAL, IDLE, ICR_LEVEL_DE_ASSERT, EDGE_TRIGGER, 0x20, ICR_Start_up, ICR_No_Shorthand, true, proc_local_apic_structs[i]->local_apic_id);
+        ipi_send_IPI(DEST_PHYSICAL, IDLE, ICR_LEVEL_DE_ASSERT, EDGE_TRIGGER, 0x20, ICR_Start_up, ICR_No_Shorthand, proc_local_apic_structs[i]->local_apic_id);
+
     }
     io_mfence();
     while (num_cpu_started != total_processor_num)
@@ -124,16 +134,10 @@ void smp_ap_start()
                          : "memory");
     __asm__ __volatile__("movq %0, %%rsp \n\t" ::"m"(cpu_core_info[current_starting_cpu].stack_start)
                          : "memory");
-    /*
-        __asm__ __volatile__("movq %0, %%rbp \n\t" ::"m"(stack_start)
-                             : "memory");
-        __asm__ __volatile__("movq %0, %%rsp \n\t" ::"m"(stack_start)
-                             : "memory");*/
-    ksuccess("AP core successfully started!");
+
+    ksuccess("AP core %d successfully started!", current_starting_cpu);
     io_mfence();
     ++num_cpu_started;
-
-    kdebug("current cpu = %d", current_starting_cpu);
 
     apic_init_ap_core_local_apic();
 
@@ -162,7 +166,6 @@ void smp_ap_start()
     load_TR(10 + current_starting_cpu * 2);
     current_pcb->preempt_count = 0;
 
-    // kdebug("IDT_addr = %#018lx", phys_2_virt(IDT_Table));
     io_mfence();
     spin_unlock(&multi_core_starting_lock);
     preempt_disable(); // 由于ap处理器的pcb与bsp的不同，因此ap处理器放锁时，需要手动恢复preempt count
@@ -172,10 +175,6 @@ void smp_ap_start()
     while (1)
         hlt();
 
-    /*
-        if (proc_current_cpu_id == 1)
-            process_init();
-            */
     while (1)
     {
         printk_color(BLACK, WHITE, "CPU:%d IDLE process.\n", proc_current_cpu_id);

@@ -12,6 +12,8 @@
 #include <driver/usb/usb.h>
 #include <exception/gate.h>
 #include <filesystem/fat32/fat32.h>
+#include <filesystem/devfs/devfs.h>
+#include <filesystem/rootfs/rootfs.h>
 #include <mm/slab.h>
 #include <common/spinlock.h>
 #include <syscall/syscall.h>
@@ -19,8 +21,13 @@
 #include <sched/sched.h>
 #include <common/unistd.h>
 #include <debug/traceback/traceback.h>
+#include <driver/disk/ahci/ahci.h>
 
 #include <ktest/ktest.h>
+
+#include <mm/mmio.h>
+
+#include <common/lz4.h>
 
 // #pragma GCC push_options
 // #pragma GCC optimize("O0")
@@ -32,7 +39,7 @@ extern void system_call(void);
 extern void kernel_thread_func(void);
 
 ul _stack_start; // initial proc的栈基地址（虚拟地址）
-struct mm_struct initial_mm = {0};
+extern struct mm_struct initial_mm;
 struct thread_struct initial_thread =
     {
         .rbp = (ul)(initial_proc_union.stack + STACK_SIZE / sizeof(ul)),
@@ -148,7 +155,7 @@ struct vfs_file_t *process_open_exec_file(char *path)
     if (dentry == NULL)
         return (void *)-ENOENT;
 
-    if (dentry->dir_inode->attribute == VFS_ATTR_DIR)
+    if (dentry->dir_inode->attribute == VFS_IF_DIR)
         return (void *)-ENOTDIR;
 
     filp = (struct vfs_file_t *)kmalloc(sizeof(struct vfs_file_t), 0);
@@ -251,24 +258,34 @@ static int process_load_elf_file(struct pt_regs *regs, char *path)
         int64_t remain_file_size = phdr->p_filesz;
         pos = phdr->p_offset;
 
-        uint64_t virt_base = phdr->p_vaddr;
+        uint64_t virt_base = 0;
+        uint64_t beginning_offset = 0; // 由于页表映射导致的virtbase与实际的p_vaddr之间的偏移量
+
+        if (remain_mem_size >= PAGE_2M_SIZE) // 接下来存在映射2M页的情况，因此将vaddr按2M向下对齐
+            virt_base = phdr->p_vaddr & PAGE_2M_MASK;
+        else // 接下来只有4K页的映射
+            virt_base = phdr->p_vaddr & PAGE_4K_MASK;
+
+        beginning_offset = phdr->p_vaddr - virt_base;
+        remain_mem_size += beginning_offset;
 
         while (remain_mem_size > 0)
         {
             // kdebug("loading...");
             int64_t map_size = 0;
-
-            if (remain_mem_size > PAGE_2M_SIZE / 2)
+            if (remain_mem_size >= PAGE_2M_SIZE)
             {
-
                 uint64_t pa = alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys;
                 struct vm_area_struct *vma = NULL;
                 int ret = mm_create_vma(current_pcb->mm, virt_base, PAGE_2M_SIZE, VM_USER | VM_ACCESS_FLAGS, NULL, &vma);
+                
                 // 防止内存泄露
                 if (ret == -EEXIST)
                     free_pages(Phy_to_2M_Page(pa), 1);
                 else
-                    mm_map_vma(vma, pa);
+                    mm_map(current_pcb->mm, virt_base, PAGE_2M_SIZE, pa);
+                // mm_map_vma(vma, pa, 0, PAGE_2M_SIZE);
+                io_mfence();
                 memset((void *)virt_base, 0, PAGE_2M_SIZE);
                 map_size = PAGE_2M_SIZE;
             }
@@ -283,20 +300,23 @@ static int process_load_elf_file(struct pt_regs *regs, char *path)
 
                     struct vm_area_struct *vma = NULL;
                     int val = mm_create_vma(current_pcb->mm, virt_base + off, PAGE_4K_SIZE, VM_USER | VM_ACCESS_FLAGS, NULL, &vma);
+                    // kdebug("virt_base=%#018lx", virt_base + off);
                     if (val == -EEXIST)
                         kfree(phys_2_virt(paddr));
                     else
-                        mm_map_vma(vma, paddr);
+                        mm_map(current_pcb->mm, virt_base + off, PAGE_4K_SIZE, paddr);
+                    // mm_map_vma(vma, paddr, 0, PAGE_4K_SIZE);
+                    io_mfence();
                     memset((void *)(virt_base + off), 0, PAGE_4K_SIZE);
                 }
             }
 
             pos = filp->file_ops->lseek(filp, pos, SEEK_SET);
             int64_t val = 0;
-            if (remain_file_size != 0)
+            if (remain_file_size > 0)
             {
                 int64_t to_trans = (remain_file_size > PAGE_2M_SIZE) ? PAGE_2M_SIZE : remain_file_size;
-                val = filp->file_ops->read(filp, (char *)virt_base, to_trans, &pos);
+                val = filp->file_ops->read(filp, (char *)(virt_base + beginning_offset), to_trans, &pos);
             }
 
             if (val < 0)
@@ -319,7 +339,7 @@ static int process_load_elf_file(struct pt_regs *regs, char *path)
         if (val == -EEXIST)
             free_pages(Phy_to_2M_Page(pa), 1);
         else
-            mm_map_vma(vma, pa);
+            mm_map_vma(vma, pa, 0, PAGE_2M_SIZE);
     }
 
     // 清空栈空间
@@ -459,29 +479,27 @@ ul initial_kernel_thread(ul arg)
 {
     // kinfo("initial proc running...\targ:%#018lx", arg);
 
+    ahci_init();
     fat32_init();
-    usb_init();
+    rootfs_umount();
+
+    // 使用单独的内核线程来初始化usb驱动程序
+    int usb_pid = kernel_thread(usb_init, 0, 0);
+
+    kinfo("LZ4 lib Version=%s", LZ4_versionString());
 
     // 对一些组件进行单元测试
     uint64_t tpid[] = {
         ktest_start(ktest_test_bitree, 0),
         ktest_start(ktest_test_kfifo, 0),
         ktest_start(ktest_test_mutex, 0),
+        usb_pid,
     };
     kinfo("Waiting test thread exit...");
     // 等待测试进程退出
     for (int i = 0; i < sizeof(tpid) / sizeof(uint64_t); ++i)
         waitpid(tpid[i], NULL, NULL);
     kinfo("All test done.");
-    // pid_t p = fork();
-    // if (p == 0)
-    // {
-    //     kdebug("in subproc, rflags=%#018lx", get_rflags());
-
-    //     while (1)
-    //         usleep(1000);
-    // }
-    // kdebug("subprocess pid=%d", p);
 
     // 准备切换到用户态
     struct pt_regs *regs;
@@ -545,7 +563,7 @@ ul process_do_exit(ul code)
     sti();
 
     process_exit_notify();
-    sched_cfs();
+    sched();
 
     while (1)
         pause();
@@ -800,7 +818,7 @@ struct process_control_block *process_get_pcb(long pid)
 void process_wakeup(struct process_control_block *pcb)
 {
     pcb->state = PROC_RUNNING;
-    sched_cfs_enqueue(pcb);
+    sched_enqueue(pcb);
 }
 
 /**
@@ -811,7 +829,7 @@ void process_wakeup(struct process_control_block *pcb)
 void process_wakeup_immediately(struct process_control_block *pcb)
 {
     pcb->state = PROC_RUNNING;
-    sched_cfs_enqueue(pcb);
+    sched_enqueue(pcb);
     // 将当前进程标志为需要调度，缩短新进程被wakeup的时间
     current_pcb->flags |= PF_NEED_SCHED;
 }
@@ -922,7 +940,7 @@ uint64_t process_copy_mm(uint64_t clone_flags, struct process_control_block *pcb
     struct vm_area_struct *vma = current_pcb->mm->vmas;
     while (vma != NULL)
     {
-        if (vma->vm_end > USER_MAX_LINEAR_ADDR)
+        if (vma->vm_end > USER_MAX_LINEAR_ADDR || vma->vm_flags & VM_DONTCOPY)
         {
             vma = vma->vm_next;
             continue;
@@ -943,7 +961,7 @@ uint64_t process_copy_mm(uint64_t clone_flags, struct process_control_block *pcb
                 if (unlikely(ret == -EEXIST))
                     free_pages(Phy_to_2M_Page(pa), 1);
                 else
-                    mm_map_vma(new_vma, pa);
+                    mm_map_vma(new_vma, pa, 0, PAGE_2M_SIZE);
 
                 memcpy((void *)phys_2_virt(pa), (void *)(vma->vm_start + i * PAGE_2M_SIZE), (vma_size >= PAGE_2M_SIZE) ? PAGE_2M_SIZE : vma_size);
                 vma_size -= PAGE_2M_SIZE;
@@ -960,7 +978,7 @@ uint64_t process_copy_mm(uint64_t clone_flags, struct process_control_block *pcb
             if (unlikely(ret == -EEXIST))
                 kfree((void *)va);
             else
-                mm_map_vma(new_vma, virt_2_phys(va));
+                mm_map_vma(new_vma, virt_2_phys(va), 0, map_size);
 
             memcpy((void *)va, (void *)vma->vm_start, vma_size);
         }
@@ -998,19 +1016,19 @@ uint64_t process_exit_mm(struct process_control_block *pcb)
     struct vm_area_struct *vma = pcb->mm->vmas;
     while (vma != NULL)
     {
+
         struct vm_area_struct *cur_vma = vma;
         vma = cur_vma->vm_next;
 
         uint64_t pa;
-        mm_umap_vma(pcb->mm, cur_vma, &pa);
+        // kdebug("vm start=%#018lx, sem=%d", cur_vma->vm_start, cur_vma->anon_vma->sem.counter);
+        mm_unmap_vma(pcb->mm, cur_vma, &pa);
+
         uint64_t size = (cur_vma->vm_end - cur_vma->vm_start);
 
         // 释放内存
         switch (size)
         {
-        case PAGE_2M_SIZE:
-            free_pages(Phy_to_2M_Page(pa), 1);
-            break;
         case PAGE_4K_SIZE:
             kfree(phys_2_virt(pa));
             break;
@@ -1018,7 +1036,7 @@ uint64_t process_exit_mm(struct process_control_block *pcb)
             break;
         }
         vm_area_del(cur_vma);
-        kfree(cur_vma);
+        vm_area_free(cur_vma);
     }
 
     // 释放顶层页表

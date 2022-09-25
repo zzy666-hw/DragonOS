@@ -1,3 +1,5 @@
+(_core_mm_api)=
+
 # 内存管理API
 
 ## SLAB内存池
@@ -222,7 +224,7 @@ DragonOS支持对物理页的直接操作
 
 &emsp;&emsp;要取消映射的地址空间的长度
 
-### `mm_unmap(virt_addr, length)`
+### `mm_unmap_addr(virt_addr, length)`
 
 #### 描述
 
