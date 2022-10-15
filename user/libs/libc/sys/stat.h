@@ -26,3 +26,8 @@ int mkdir(const char *path, mode_t mode);
  */
 int mstat(struct mstat_t* stat);
 int pipe(int *fd);
+
+uint64_t shmget();
+uint64_t shmat();
+uint64_t shmdt();
+uint64_t shmctl();

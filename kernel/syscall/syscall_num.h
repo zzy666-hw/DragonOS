@@ -35,5 +35,9 @@
 #define SYS_MSTAT 21    // 获取系统的内存状态信息
 #define SYS_RMDIR 22    // 删除文件夹
 
+#define SYS_SHMGET 23
+#define SYS_SHMAT  24
+#define SYS_SHMDT  25
+#define SYS_SHMCTL 26
 
 #define SYS_AHCI_END_REQ 255    // AHCI DMA请求结束end_request的系统调用

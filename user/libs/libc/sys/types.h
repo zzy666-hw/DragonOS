@@ -49,6 +49,7 @@ struct utimbuf
 
 typedef int pthread_t;
 typedef int pthread_key_t;
+typedef int key_t;
 typedef uint32_t pthread_once_t;
 
 typedef struct __pthread_mutex_t

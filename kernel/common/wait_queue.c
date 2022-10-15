@@ -48,22 +48,6 @@ void wait_queue_sleep_on_unlock(wait_queue_node_t *wait_queue_head,
 }
 
 /**
- * @brief 在等待队列上进行等待，同时释放自旋锁
- *
- * @param wait_queue_head 队列头指针
- */
-void wait_queue_sleep_on_unlock(wait_queue_node_t *wait_queue_head,
-                                void *lock)
-{
-    wait_queue_node_t *wait = (wait_queue_node_t *)kmalloc(sizeof(wait_queue_node_t), 0);
-    wait_queue_init(wait, current_pcb);
-    current_pcb->state = PROC_UNINTERRUPTIBLE;
-    list_append(&wait_queue_head->wait_list, &wait->wait_list);
-    spin_unlock((spinlock_t *)lock);
-    sched_cfs();
-}
-
-/**
  * @brief 在等待队列上进行等待(允许中断)
  *
  * @param wait_queue_head 队列头指针

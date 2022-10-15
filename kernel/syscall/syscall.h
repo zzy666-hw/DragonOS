@@ -93,6 +93,11 @@ uint64_t sys_mkdir(struct pt_regs * regs);
  */
 uint64_t sys_pipe(struct pt_regs * regs);
 
+uint64_t sys_shmget(struct pt_regs * regs);
+uint64_t sys_shmat(struct pt_regs * regs);
+uint64_t sys_shmdt(struct pt_regs * regs);
+uint64_t sys_shmctl(struct pt_regs * regs);
+
 ul sys_ahci_end_req(struct pt_regs *regs);
 
 // 系统调用的内核入口程序

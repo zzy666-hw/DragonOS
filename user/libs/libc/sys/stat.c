@@ -21,3 +21,23 @@ int pipe(int *fd)
 {
     return syscall_invoke(SYS_PIPE, (uint64_t)fd, 0, 0,0,0,0,0,0);
 }
+
+uint64_t shmget()
+{
+    return syscall_invoke(SYS_SHMGET, (uint64_t)fd, 0, 0,0,0,0,0,0);
+}
+
+uint64_t shmat()
+{
+    return syscall_invoke(SYS_SHMAT, (uint64_t)fd, 0, 0,0,0,0,0,0);
+}
+
+uint64_t shmdt()
+{
+    return syscall_invoke(SYS_SHMDT, (uint64_t)fd, 0, 0,0,0,0,0,0);
+}
+
+uint64_t shmctl()
+{
+    return syscall_invoke(SYS_SHMCTL, (uint64_t)fd, 0, 0,0,0,0,0,0);
+}
